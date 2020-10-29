@@ -23,10 +23,10 @@ import 'package:meta/meta.dart';
 import '../shared/timeout.dart';
 
 import 'call.dart';
+import 'client_transport_connector.dart';
 import 'connection.dart' hide ClientConnection;
 import 'connection.dart' as connection;
 
-import 'http2_connection.dart';
 import 'options.dart';
 import 'transport/http2_credentials.dart';
 import 'transport/http2_transport.dart';
@@ -44,7 +44,7 @@ class Http2ClientConnectionCustom implements connection.ClientConnection {
   static final _grpcAcceptEncoding =
       Header.ascii('grpc-accept-encoding', 'identity');
 
-  ChannelOptions options;
+  final ChannelOptions options;
 
   connection.ConnectionState _state = ConnectionState.idle;
 
@@ -52,6 +52,7 @@ class Http2ClientConnectionCustom implements connection.ClientConnection {
   void Function(Http2ClientConnectionCustom connection) onStateChanged;
   final _pendingCalls = <ClientCall>[];
 
+  final ClientTransportConnector _transportConnector;
   ClientTransportConnection _transportConnection;
 
   /// Used for idle and reconnect timeout, depending on [_state].
@@ -62,16 +63,17 @@ class Http2ClientConnectionCustom implements connection.ClientConnection {
 
   Duration _currentReconnectDelay;
   MetadataDelegate _metadataDelegate;
-  final String host;
-  final int port;
 
   Http2ClientConnectionCustom(
-      this.host, this.port, this.options, this._metadataDelegate);
+      String host, int port, this.options, this._metadataDelegate)
+      : _transportConnector = _SocketTransportConnector(host, port, options);
+
+  Http2ClientConnectionCustom.fromClientTransportConnector(
+      this._transportConnector, this.options, this._metadataDelegate);
 
   ChannelCredentials get credentials => options.credentials;
 
-  String get authority =>
-      options.credentials.authority ?? (port == 443 ? host : "$host:$port");
+  String get authority => _transportConnector.authority;
 
   String get scheme => options.credentials.isSecure ? 'https' : 'http';
 
@@ -80,22 +82,8 @@ class Http2ClientConnectionCustom implements connection.ClientConnection {
   static const _estimatedRoundTripTime = const Duration(milliseconds: 20);
 
   Future<ClientTransportConnection> connectTransport() async {
-    final securityContext = credentials.securityContext;
-    Socket socket = await Socket.connect(host, port);
-    if (securityContext != null) {
-      // Todo(sigurdm): We want to pass supportedProtocols: ['h2']. http://dartbug.com/37950
-      socket = await SecureSocket.secure(socket,
-          // This is not really the host, but the authority to verify the TLC
-          // connection against.
-          //
-          // We don't use `this.authority` here, as that includes the port.
-          host: options.credentials.authority ?? host,
-          context: securityContext,
-          onBadCertificate: _validateBadCertificate);
-    }
-
-    final connection = ClientTransportConnection.viaSocket(socket);
-    socket.done.then((_) => _abandonConnection());
+    final connection = await _transportConnector.connect();
+    _transportConnector.done.then((_) => _abandonConnection());
 
     // Give the settings settings-frame a bit of time to arrive.
     // TODO(sigurdm): This is a hack. The http2 package should expose a way of
@@ -103,7 +91,7 @@ class Http2ClientConnectionCustom implements connection.ClientConnection {
     await new Future.delayed(_estimatedRoundTripTime);
 
     if (_state == ConnectionState.shutdown) {
-      socket.destroy();
+      _transportConnector.shutdown();
       throw _ShutdownException();
     }
     return connection;
@@ -176,9 +164,10 @@ class Http2ClientConnectionCustom implements connection.ClientConnection {
   }
 
   GrpcTransportStream makeRequest(String path, Duration timeout,
-      Map<String, String> metadata, ErrorHandler onRequestFailure) {
-    final headers = createCallHeaders(
-        credentials.isSecure, authority, path, timeout, metadata,
+      Map<String, String> metadata, ErrorHandler onRequestFailure,
+      {CallOptions callOptions}) {
+    final headers = createCallHeaders(credentials.isSecure,
+        _transportConnector.authority, path, timeout, metadata,
         userAgent: options.userAgent);
     final stream = _transportConnection.makeRequest(headers);
     return Http2TransportStream(stream, onRequestFailure);
@@ -317,9 +306,57 @@ class Http2ClientConnectionCustom implements connection.ClientConnection {
     });
     return headers;
   }
+}
+
+class _SocketTransportConnector implements ClientTransportConnector {
+  final String _host;
+  final int _port;
+  final ChannelOptions _options;
+  Socket _socket;
+
+  _SocketTransportConnector(this._host, this._port, this._options);
+
+  @override
+  Future<ClientTransportConnection> connect() async {
+    final securityContext = _options.credentials.securityContext;
+    _socket = await Socket.connect(_host, _port);
+    // Don't wait for io buffers to fill up before sending requests.
+    _socket.setOption(SocketOption.tcpNoDelay, true);
+    if (securityContext != null) {
+      // Todo(sigurdm): We want to pass supportedProtocols: ['h2'].
+      // http://dartbug.com/37950
+      _socket = await SecureSocket.secure(_socket,
+          // This is not really the host, but the authority to verify the TLC
+          // connection against.
+          //
+          // We don't use `this.authority` here, as that includes the port.
+          host: _options.credentials.authority ?? _host,
+          context: securityContext,
+          onBadCertificate: _validateBadCertificate);
+    }
+
+    return ClientTransportConnection.viaSocket(_socket);
+  }
+
+  @override
+  String get authority =>
+      _options.credentials.authority ??
+      (_port == 443 ? _host : "$_host:$_port");
+
+  @override
+  Future get done {
+    assert(_socket != null);
+    return _socket.done;
+  }
+
+  @override
+  void shutdown() {
+    assert(_socket != null);
+    _socket.destroy();
+  }
 
   bool _validateBadCertificate(X509Certificate certificate) {
-    final credentials = this.credentials;
+    final credentials = _options.credentials;
     final validator = credentials.onBadCertificate;
 
     if (validator == null) return false;

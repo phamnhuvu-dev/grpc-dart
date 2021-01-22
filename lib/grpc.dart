@@ -24,6 +24,7 @@ export 'src/auth/auth_io.dart'
         ComputeEngineAuthenticator,
         ServiceAccountAuthenticator;
 export 'src/client/call.dart' show CallOptions, ClientCall, MetadataProvider;
+export 'src/client/channel.dart' show ClientChannelBase;
 export 'src/client/client.dart' show Client;
 export 'src/client/client_transport_connector.dart'
     show ClientTransportConnector;
@@ -67,3 +68,4 @@ export 'src/shared/security.dart'
 export 'src/shared/status.dart' show StatusCode, GrpcError;
 export 'src/shared/streams.dart' show GrpcHttpEncoder, GrpcHttpDecoder;
 export 'src/shared/timeout.dart' show toTimeoutString, fromTimeoutString;
+export 'src/shared/grpc_utils.dart';

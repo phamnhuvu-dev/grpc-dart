@@ -17,6 +17,7 @@ import 'dart:async';
 import 'dart:html';
 import 'dart:typed_data';
 
+import 'package:grpc/src/shared/grpc_utils.dart';
 import 'package:meta/meta.dart';
 
 import '../../client/call.dart';
@@ -54,9 +55,15 @@ class XhrTransportStream implements GrpcTransportStream {
   XhrTransportStream(this._request, {onError, onDone})
       : _onError = onError,
         _onDone = onDone {
-    _outgoingMessages.stream
-        .map(frame)
-        .listen((data) => _request.send(data), cancelOnError: true);
+    _outgoingMessages.stream.map(frame).listen((data) async {
+      if (asyncInterceptor != null) {
+        final metadata = await asyncInterceptor();
+        for (final header in metadata.keys) {
+          _request.setRequestHeader(header, metadata[header]);
+        }
+      }
+      return _request.send(data);
+    }, cancelOnError: true);
 
     _request.onReadyStateChange.listen((data) {
       if (_incomingMessages.isClosed) {

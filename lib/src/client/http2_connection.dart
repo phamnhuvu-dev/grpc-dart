@@ -138,7 +138,8 @@ class Http2ClientConnection implements connection.ClientConnection {
     if (_transportConnection != null) {
       _refreshConnectionIfUnhealthy();
     }
-    if (asyncInterceptor != null) {
+    if (asyncInterceptor != null &&
+        call.options.metadata[ignoreInterceptorKey] != true.toString()) {
       call.options = CallOptions(
         metadata: (await asyncInterceptor())..addAll(call.options.metadata),
         timeout: call.options.timeout,
